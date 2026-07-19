@@ -1,8 +1,5 @@
 # WhatsApp Deployment Scripts
 
-1. ./build.sh
-2. export VERIFY_TOKEN=...
-3. export WHATSAPP_ACCESS_TOKEN=...
-4. export OPENAI_API_KEY=...
-5. ./deploy.sh
-6. ./test.sh
+To clean, build and deploy the poc run:
+
+./main.sh 
