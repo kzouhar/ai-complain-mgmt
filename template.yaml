@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: WhatsApp Cloud API Webhook
+
+Parameters:
+
+  VerifyToken:
+    Type: String
+    Default: khalil
+  WhatsAppAccessToken:
+    Type: String
+  AudioMediaBucket:
+    Type: String  
+  TranscribedMediaBucket:
+    Type: String    
+  LambdaCodeBucket:
+    Type: String
+  TranscriptsTable:
+    Type: String
+  LambdaCodeKey:
+    Type: String
+  OpenApiToken:
+    Type: String
+Resources:
+
+############################################################
+# IAM Role
+############################################################
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Policies:
+          - PolicyName: WhatsAppWebhookPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                  Resource:
+                    - !Sub arn:aws:s3:::${AudioMediaBucket}
+                - Effect: Allow
+                  Action:
+                    - s3:ListBucket
+                  Resource: 
+                    - !Sub arn:aws:s3:::${TranscribedMediaBucket}
+                - Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:GetObject
+                  Resource: !Sub arn:aws:s3:::${AudioMediaBucket}/*
+                - Effect: Allow
+                  Action:
+                    - s3:PutObject
+                    - s3:GetObject
+                  Resource: !Sub arn:aws:s3:::${TranscribedMediaBucket}/*
+                - Effect: Allow
+                  Action:
+                    - transcribe:StartTranscriptionJob
+                    - transcribe:GetTranscriptionJob
+                    - transcribe:DeleteTranscriptionJob
+                  Resource: "*"  
+                - Effect: Allow
+                  Action:
+                    - dynamodb:PutItem
+                    - dynamodb:GetItem
+                    - dynamodb:UpdateItem
+                    - dynamodb:Query
+                    - dynamodb:Scan
+                  Resource:
+                    - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/whatsapp-transcripts        
+       
+############################################################
+# Lambda
+############################################################
+
+  WhatsAppWebhookLambda:
+
+    Type: AWS::Lambda::Function
+
+    Properties:
+      FunctionName: whatsapp-webhook
+      Runtime: python3.13
+
+      Handler: lambda_function.lambda_handler
+
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+      Timeout: 30
+
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+
+      Environment:
+        Variables:
+          VERIFY_TOKEN: !Ref VerifyToken
+          WHATSAPP_ACCESS_TOKEN: !Ref WhatsAppAccessToken
+          MEDIA_BUCKET: !Ref AudioMediaBucket
+          OPEN_API_KEY: !Ref OpenApiToken
+
+  TranscribeLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: whatsapp-transcribe
+      Runtime: python3.13
+      Handler: transcribe.lambda_handler
+      Timeout: 900
+      MemorySize: 512
+
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: transcribe.zip
+
+      Environment:
+        Variables:
+          OUTPUT_BUCKET: !Ref TranscribedMediaBucket
+          WHATSAPP_ACCESS_TOKEN: !Ref WhatsAppAccessToken
+          TRANSCRIPTS_TABLE: !Ref TranscriptsTable
+          OPEN_API_KEY: !Ref OpenApiToken
+
+############################################################
+# REST API
+############################################################
+
+  WebhookApi:
+
+    Type: AWS::ApiGateway::RestApi
+
+    Properties:
+      Name: whatsapp-webhook-api
+
+
+############################################################
+# /webhook
+############################################################
+
+  WebhookResource:
+
+    Type: AWS::ApiGateway::Resource
+
+    Properties:
+
+      ParentId: !GetAtt WebhookApi.RootResourceId
+
+      PathPart: webhook
+
+      RestApiId: !Ref WebhookApi
+
+
+############################################################
+# GET
+############################################################
+
+  GetMethod:
+
+    Type: AWS::ApiGateway::Method
+
+    Properties:
+
+      AuthorizationType: NONE
+
+      HttpMethod: GET
+
+      ResourceId: !Ref WebhookResource
+
+      RestApiId: !Ref WebhookApi
+
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub:
+            - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+            - LambdaArn: !GetAtt WhatsAppWebhookLambda.Arn
+############################################################
+# POST
+############################################################
+
+  PostMethod:
+
+    Type: AWS::ApiGateway::Method
+
+    Properties:
+
+      AuthorizationType: NONE
+
+      HttpMethod: POST
+
+      ResourceId: !Ref WebhookResource
+
+      RestApiId: !Ref WebhookApi
+
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub:
+            - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+            - LambdaArn: !GetAtt WhatsAppWebhookLambda.Arn
+
+############################################################
+# Lambda Permission
+############################################################
+
+  LambdaPermission:
+
+    Type: AWS::Lambda::Permission
+
+    Properties:
+
+      FunctionName: !Ref WhatsAppWebhookLambda
+
+      Action: lambda:InvokeFunction
+
+      Principal: apigateway.amazonaws.com
+
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebhookApi}/*/*"
+
+
+############################################################
+# Deployment
+############################################################
+
+  ApiDeployment:
+
+    Type: AWS::ApiGateway::Deployment
+
+    DependsOn:
+
+      - GetMethod
+
+      - PostMethod
+
+    Properties:
+
+      RestApiId: !Ref WebhookApi
+
+      StageName: prod
+
+
+Outputs:
+
+  CallbackURL:
+
+    Value: !Sub >
+      https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook
